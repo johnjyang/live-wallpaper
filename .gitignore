@@ -1,0 +1,11 @@
+.DS_Store
+build/
+__pycache__/
+*.pyc
+performance-*.json
+validation.json
+*.log
+*.mov
+*.mp4
+*.heic
+*.preload-part
