@@ -27,6 +27,10 @@ Click the play-rectangle icon in the menu bar:
 - **Always Play**: keep playing behind windows.
 - **Pause**: hide the helper's windows and show Apple's normal wallpaper.
 
+Apple's **Shuffle All**, **Shuffle Landscape**, **Shuffle Cityscape**, **Shuffle Underwater**, and **Shuffle Earth** selections also work. The helper chooses from downloaded, shuffle-eligible videos in the selected collection without repeating a video until the collection has been visited. **Continuously** advances at the end of a clip; the 12-hour, daily, two-day, weekly, and monthly settings loop the current clip until their interval expires. Timed rotation sleeps while playback is inactive and catches up when playback resumes.
+
+**Next Shuffle Video** advances immediately within the selected collection. Matching displays share the same shuffled video and player. The helper manages its live rotation independently of Apple's frozen wallpaper frame and screen-saver shuffle; it does not write a replacement selection into Apple's store.
+
 The app also observes display sleep, session inactivity, screen lock, and screen saver notifications. Choosing a still image returns to normal macOS behavior. If the selected video is missing or not ready, the helper leaves Apple's background visible.
 
 ## How it works
@@ -63,7 +67,15 @@ The test suite covers:
 - Wallpaper selection precedence and non-aerial fallbacks.
 - Invalid asset IDs and undefined playback timestamps.
 
-The suite currently passes **232 checks**. Selection changes, original-speed playback, shared playback across two displays, and manual pause/resume were also checked on a running macOS 27 system.
+The suite currently passes **315 checks**. Selection changes, original-speed playback, shared playback across two displays, and manual pause/resume were also checked on a running macOS 27 system.
+
+An optional playback integration test uses a one-second local extract of an existing downloaded aerial to exercise the production loop callback and pause behavior:
+
+```sh
+bash test-playback.sh
+```
+
+The temporary extract stays on your Mac and is removed after a successful test. This test is separate from CI, which has no Apple videos.
 
 CI builds and runs the noninteractive tests. It does not validate desktop rendering, permissions, or sleep/wake behavior.
 
@@ -83,7 +95,7 @@ Measurements and diagnostics stay local and are ignored by Git. The app writes s
 
 ## Compatibility limits
 
-- **Direct Apple aerial thumbnails only.** Shuffle Aerials is not implemented.
+- Direct aerial thumbnails, the bundled default aerial, and standard aerial shuffle collections are supported. Unknown shuffle interval identifiers fall back to normal macOS behavior.
 - The video-store path is the newer per-user location. Sonoma/Sequoia's legacy system store is not implemented.
 - Apple still images and shader-based dynamic wallpapers retain their normal behavior.
 - Display and Space overrides are parsed. Per-Space transitions, display hot-plug, screen lock, and sleep/wake have not been tested end to end.
@@ -98,6 +110,7 @@ Measurements and diagnostics stay local and are ignored by Git. The app writes s
 "$HOME/Applications/Live Wallpaper.app/Contents/MacOS/LiveWallpaper" --mode always
 "$HOME/Applications/Live Wallpaper.app/Contents/MacOS/LiveWallpaper" --mode paused
 "$HOME/Applications/Live Wallpaper.app/Contents/MacOS/LiveWallpaper" --refresh-status
+"$HOME/Applications/Live Wallpaper.app/Contents/MacOS/LiveWallpaper" --next
 "$HOME/Applications/Live Wallpaper.app/Contents/MacOS/LiveWallpaper" --quit
 ```
 

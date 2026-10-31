@@ -23,6 +23,7 @@ enum StatusJSON {
 
 enum WallpaperSelection: Equatable {
     case aerial(String)
+    case shuffle(ShuffleChoice)
     case systemDefault
     case other
     case unavailable
@@ -30,7 +31,7 @@ enum WallpaperSelection: Equatable {
 
 enum WallpaperStore {
     // Read-only: these are the system's files, never rewritten by this app.
-    static func selection(in store: [String: Any], display: String, space: String?) -> WallpaperSelection {
+    static func selection(in store: [String: Any], display: String, space: String?, categoryIDs: Set<String> = []) -> WallpaperSelection {
         var sections: [[String: Any]] = []
         if let space, let entry = (store["Spaces"] as? [String: [String: Any]])?[space] {
             if let d = (entry["Displays"] as? [String: [String: Any]])?[display] { sections.append(d) }
@@ -55,10 +56,92 @@ enum WallpaperStore {
             guard provider == "com.apple.wallpaper.choice.aerials" else { return .other }
             guard let data = choice["Configuration"] as? Data,
                   let config = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-                  let id = config["assetID"] as? String, UUID(uuidString: id) != nil else { return .unavailable }
+                  let id = config["assetID"] as? String else { return .unavailable }
+            if id == "shuffle-all-aerials" || categoryIDs.contains(id) {
+                let options = (content["EncodedOptionValues"] as? Data).flatMap {
+                    try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any]
+                }
+                let values = options?["values"] as? [String: Any]
+                let frequency = values?["aerialShuffleFrequency"] as? [String: Any]
+                let picker = (frequency?["picker"] as? [String: Any])?["_0"] as? [String: Any]
+                let raw = picker?["id"] as? String ?? "shuffle_continuously"
+                guard let cadence = ShuffleCadence(rawValue: raw) else { return .unavailable }
+                return .shuffle(ShuffleChoice(collectionID: id, cadence: cadence))
+            }
+            guard UUID(uuidString: id) != nil else { return .unavailable }
             return .aerial(id)
         }
         return .unavailable
+    }
+}
+
+enum ShuffleCadence: String, Hashable {
+    case continuously = "shuffle_continuously"
+    case twelveHours = "shuffle_every_12_hours"
+    case day = "shuffle_every_1_day"
+    case twoDays = "shuffle_every_2_days"
+    case week = "shuffle_every_1_week"
+    case month = "shuffle_every_1_month"
+
+    func deadline(after date: Date) -> Date? {
+        switch self {
+        case .continuously: return nil
+        case .twelveHours: return date.addingTimeInterval(12 * 3600)
+        case .day: return Calendar.current.date(byAdding: .day, value: 1, to: date)
+        case .twoDays: return Calendar.current.date(byAdding: .day, value: 2, to: date)
+        case .week: return Calendar.current.date(byAdding: .day, value: 7, to: date)
+        case .month: return Calendar.current.date(byAdding: .month, value: 1, to: date)
+        }
+    }
+}
+
+struct ShuffleChoice: Hashable {
+    let collectionID: String
+    let cadence: ShuffleCadence
+}
+
+struct AerialCatalog {
+    struct Asset {
+        let id: String
+        let name: String
+        let categories: Set<String>
+        let includeInShuffle: Bool
+    }
+    let assets: [Asset]
+    let categoryIDs: Set<String>
+    init(_ manifest: [String: Any]) {
+        assets = (manifest["assets"] as? [[String: Any]] ?? []).compactMap { a in
+            guard let id = a["id"] as? String, UUID(uuidString: id) != nil else { return nil }
+            return Asset(id: id, name: a["accessibilityLabel"] as? String ?? id,
+                         categories: Set(a["categories"] as? [String] ?? []),
+                         includeInShuffle: a["includeInShuffle"] as? Bool ?? true)
+        }
+        categoryIDs = Set((manifest["categories"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String })
+    }
+    func candidates(for choice: ShuffleChoice, available: (String) -> Bool) -> [String] {
+        assets.filter { $0.includeInShuffle &&
+            (choice.collectionID == "shuffle-all-aerials" || $0.categories.contains(choice.collectionID)) && available($0.id)
+        }.map(\.id)
+    }
+}
+
+struct ShuffleBag {
+    private(set) var current: String?
+    private var remaining: [String] = []
+    private var eligible: Set<String> = []
+    mutating func select(from candidates: [String], advance: Bool = false) -> String? {
+        let pool = Set(candidates)
+        remaining = remaining.filter { pool.contains($0) }
+        remaining += Array(pool.subtracting(eligible).subtracting(Set(remaining))).filter { $0 != current }.shuffled()
+        eligible = pool
+        guard !pool.isEmpty else { current = nil; remaining = []; return nil }
+        if !advance, let current, pool.contains(current) { return current }
+        if remaining.isEmpty { remaining = Array(pool).shuffled() }
+        if remaining.first == current, let alternative = remaining.firstIndex(where: { $0 != current }) {
+            remaining.swapAt(0, alternative)
+        }
+        current = remaining.removeFirst()
+        return current
     }
 }
 

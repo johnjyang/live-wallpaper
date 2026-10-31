@@ -26,19 +26,25 @@ final class VideoSession {
     let looper: AVPlayerLooper
     let rate: Float = 1
     var playing = false
+    var onLoop: (() -> Void)?
+    private var loopObservation: NSKeyValueObservation?
     init(id: String, url: URL) {
         self.id = id
         player.isMuted = true
         player.preventsDisplaySleepDuringVideoPlayback = false
         let item = AVPlayerItem(url: url)
         looper = AVPlayerLooper(player: player, templateItem: item)
+        loopObservation = looper.observe(\.loopCount, options: [.new]) { [weak self] _, change in
+            guard (change.newValue ?? 0) > 0 else { return }
+            DispatchQueue.main.async { self?.onLoop?() }
+        }
     }
     func setPlaying(_ value: Bool) {
         guard playing != value else { return }
         playing = value
         if value { player.playImmediately(atRate: rate) } else { player.pause() }
     }
-    deinit { player.pause(); looper.disableLooping(); player.removeAllItems() }
+    deinit { loopObservation?.invalidate(); player.pause(); looper.disableLooping(); player.removeAllItems() }
 }
 
 final class Surface {
@@ -51,6 +57,7 @@ final class Surface {
     var wantsPlayback = false
     var coverage = 0.0
     var reason = "No aerial selected"
+    var shuffleChoice: ShuffleChoice?
     var onReady: (() -> Void)?
     private var readyObservation: NSKeyValueObservation?
     init(screen: NSScreen) {
@@ -98,6 +105,11 @@ final class DirectoryWatch {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private final class ShuffleState {
+        var bag = ShuffleBag()
+        var changedAt = Date()
+        var advance = false
+    }
     private let support = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/LiveWallpaper")
     private let wallpaper = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/com.apple.wallpaper")
     private let defaults = UserDefaults.standard
@@ -120,6 +132,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastMetadataMS = 0.0
     private var logHandle: FileHandle?
     private var names: [String: String] = [:]
+    private var catalog = AerialCatalog([:])
+    private var shuffles: [ShuffleChoice: ShuffleState] = [:]
+    private var shuffleTimer: Timer?
+    private var shuffleDeadline: Date?
     private var mode: PlaybackMode {
         get { PlaybackMode(rawValue: defaults.string(forKey: "mode") ?? "") ?? .visible }
         set { defaults.set(newValue.rawValue, forKey: "mode") }
@@ -198,22 +214,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let manifestURL = wallpaper.appendingPathComponent("aerials/manifest/entries.json")
         if let data = try? Data(contentsOf: manifestURL), let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let assets = manifest["assets"] as? [[String: Any]] {
-            names = Dictionary(assets.compactMap { a in
-                guard let id = a["id"] as? String else { return nil }
-                return (id, a["accessibilityLabel"] as? String ?? id)
-            }, uniquingKeysWith: { first, _ in first })
+           manifest["assets"] is [[String: Any]] {
+            catalog = AerialCatalog(manifest)
+            names = Dictionary(catalog.assets.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
         }
         let spaces = currentSpaces()
         var used: Set<String> = []
+        var usedShuffles: Set<ShuffleChoice> = []
+        var resolvedShuffles: [ShuffleChoice: String] = [:]
         for surface in surfaces {
             let space = spaces[surface.displayUUID] ?? spaces["Main"]
-            let selection = WallpaperStore.selection(in: store, display: surface.displayUUID, space: space)
+            let selection = WallpaperStore.selection(in: store, display: surface.displayUUID, space: space, categoryIDs: catalog.categoryIDs)
+            surface.shuffleChoice = nil
             let id: String
             let url: URL
             switch selection {
             case .aerial(let assetID):
                 id = assetID
+                url = wallpaper.appendingPathComponent("aerials/videos/\(id).mov")
+            case .shuffle(let choice):
+                surface.shuffleChoice = choice
+                usedShuffles.insert(choice)
+                if let resolved = resolvedShuffles[choice] { id = resolved }
+                else {
+                    let state = shuffles[choice] ?? ShuffleState()
+                    shuffles[choice] = state
+                    let candidates = catalog.candidates(for: choice) { assetID in
+                        FileManager.default.fileExists(atPath: self.wallpaper.appendingPathComponent("aerials/videos/\(assetID).mov").path)
+                    }
+                    let now = Date()
+                    let due = choice.cadence.deadline(after: state.changedAt).map { now >= $0 } ?? false
+                    let advance = state.advance || due
+                    let previous = state.bag.current
+                    guard let selected = state.bag.select(from: candidates, advance: advance) else {
+                        surface.attach(nil); surface.reason = "No downloaded videos in selected shuffle collection"; continue
+                    }
+                    state.advance = false
+                    if advance || previous != selected { state.changedAt = now }
+                    id = selected
+                    resolvedShuffles[choice] = selected
+                }
                 url = wallpaper.appendingPathComponent("aerials/videos/\(id).mov")
             case .systemDefault:
                 guard let bundled = BundledDefault.video() else {
@@ -226,22 +266,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 names[id] = "\(url.deletingPathExtension().lastPathComponent) (system default)"
             case .other, .unavailable:
                 surface.attach(nil)
-                surface.reason = selection == .other ? "Apple still/dynamic wallpaper — normal macOS behavior" : "No direct aerial selection (shuffle is not supported)"
+                surface.reason = selection == .other ? "Apple still/dynamic wallpaper — normal macOS behavior" : "Unsupported aerial selection or shuffle interval"
                 continue
             }
             guard FileManager.default.fileExists(atPath: url.path) else {
                 surface.attach(nil); surface.reason = "Waiting for \(names[id] ?? id) to finish downloading"; continue
             }
             let session = sessions[id] ?? VideoSession(id: id, url: url)
+            session.onLoop = { [weak self, weak session] in
+                guard let self, let session, self.sessions[id] === session else { return }
+                self.advanceShuffles(finishedID: id)
+            }
             sessions[id] = session; used.insert(id)
             if surface.session !== session { logEvent("\(surface.screen.localizedName): selected \(names[id] ?? id)") }
             surface.attach(session)
             surface.reason = names[id] ?? id
         }
         sessions = sessions.filter { used.contains($0.key) }
+        shuffles = shuffles.filter { usedShuffles.contains($0.key) }
         updateVisibility(force: true)
         configureTimer()
+        buildMenu()
         writeStatus()
+    }
+
+    private func advanceShuffles(finishedID: String? = nil) {
+        let choices = Set(surfaces.compactMap { surface -> ShuffleChoice? in
+            guard let choice = surface.shuffleChoice else { return nil }
+            if let finishedID {
+                guard choice.cadence == .continuously, surface.session?.id == finishedID, surface.wantsPlayback else { return nil }
+            }
+            return choice
+        })
+        guard !choices.isEmpty else { return }
+        for choice in choices { shuffles[choice]?.advance = true }
+        refresh()
+    }
+
+    private func configureShuffleTimer() {
+        let active = Set(surfaces.filter(\.wantsPlayback).compactMap(\.shuffleChoice))
+        let deadline = active.compactMap { choice in shuffles[choice].flatMap { choice.cadence.deadline(after: $0.changedAt) } }.min()
+        guard deadline != shuffleDeadline else { return }
+        shuffleTimer?.invalidate(); shuffleTimer = nil; shuffleDeadline = deadline
+        if let deadline {
+            let timer = Timer(fire: max(deadline, Date().addingTimeInterval(0.1)), interval: 0, repeats: false) { [weak self] _ in
+                self?.shuffleDeadline = nil; self?.shuffleTimer = nil; self?.refresh()
+            }
+            timer.tolerance = 1
+            RunLoop.main.add(timer, forMode: .common)
+            shuffleTimer = timer
+        }
     }
 
     private var suspended: Bool { locked || sleeping || inactive || screenSaver }
@@ -289,6 +363,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if play != session.playing { logEvent("\(names[id] ?? id): \(play ? "playing" : "paused")") }
             session.setPlaying(play)
         }
+        configureShuffleTimer()
     }
 
     @objc private func workspaceChanged(_ n: Notification) {
@@ -316,6 +391,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildMenu() {
         let menu = NSMenu()
+        menu.autoenablesItems = false
         let heading = NSMenuItem(title: "Follows Apple’s Wallpaper Selection", action: nil, keyEquivalent: "")
         heading.isEnabled = false; menu.addItem(heading); menu.addItem(.separator())
         for mode in PlaybackMode.allCases {
@@ -324,6 +400,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(item)
         }
         menu.addItem(.separator())
+        let next = NSMenuItem(title: "Next Shuffle Video", action: #selector(nextShuffle), keyEquivalent: "")
+        next.target = self; next.isEnabled = !shuffles.isEmpty; menu.addItem(next)
         for (title, action) in [("Open Wallpaper Settings…", #selector(openSettings)), ("Show Status…", #selector(showStatus)), ("Quit Live Wallpaper", #selector(quit))] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item)
         }
@@ -337,12 +415,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func openSettings() { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Wallpaper-Settings.extension")!) }
     @objc private func showStatus() { writeStatus(); NSWorkspace.shared.open(support.appendingPathComponent("status.json")) }
     @objc private func quit() { NSApp.terminate(nil) }
+    @objc private func nextShuffle() { advanceShuffles() }
     @objc private func control(_ notification: Notification) {
         if let raw = notification.userInfo?["mode"] as? String, let value = PlaybackMode(rawValue: raw) {
             mode = value; buildMenu(); updateVisibility(force: true); configureTimer()
             logEvent("Mode: \(value.rawValue)")
         }
         if notification.userInfo?["quit"] as? Bool == true { NSApp.terminate(nil) }
+        if notification.userInfo?["next"] as? Bool == true { advanceShuffles() }
         writeStatus()
     }
 
@@ -353,7 +433,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
              "coverage": s.coverage, "wantsPlayback": s.wantsPlayback, "windowVisible": s.window.isVisible,
              "playerRate": s.session?.player.rate ?? 0, "mediaTime": seconds.isFinite ? seconds : 0,
              "playerStatus": s.session?.player.status.rawValue ?? -1, "playerError": s.session?.player.error?.localizedDescription ?? "",
-             "layerReady": s.view.video.isReadyForDisplay, "windowID": s.window.windowNumber]
+             "layerReady": s.view.video.isReadyForDisplay, "windowID": s.window.windowNumber,
+             "shuffleCollection": s.shuffleChoice?.collectionID ?? "", "shuffleCadence": s.shuffleChoice?.cadence.rawValue ?? "",
+             "loopCount": s.session?.looper.loopCount ?? 0]
         }
         let status: [String: Any] = ["pid": getpid(), "mode": mode.rawValue, "suspended": suspended, "uptime": Date().timeIntervalSince(started),
             "players": sessions.count, "playingPlayers": sessions.values.filter(\.playing).count, "metadataQueries": metadataQueries,
@@ -366,12 +448,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         try? logHandle?.write(contentsOf: Data("\(ISO8601DateFormatter().string(from: Date())) \(text)\n".utf8))
     }
     func applicationWillTerminate(_ notification: Notification) {
-        visibilityTimer?.invalidate(); statusTimer?.invalidate()
+        visibilityTimer?.invalidate(); statusTimer?.invalidate(); shuffleTimer?.invalidate()
         for s in surfaces { s.close() }
         sessions.removeAll(); logEvent("Stopped"); try? logHandle?.close()
     }
 }
 
+#if !PLAYBACK_TEST
 @main enum LiveWallpaper {
     static func main() {
         let args = CommandLine.arguments
@@ -379,8 +462,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             var info: [String: Any] = [:]
             if args[1] == "--mode", args.count == 3, PlaybackMode(rawValue: args[2]) != nil { info["mode"] = args[2] }
             else if args[1] == "--quit" { info["quit"] = true }
+            else if args[1] == "--next" { info["next"] = true }
             else if args[1] != "--refresh-status" {
-                print("Usage: LiveWallpaper [--mode visible|always|paused | --refresh-status | --quit]"); exit(2)
+                print("Usage: LiveWallpaper [--mode visible|always|paused | --next | --refresh-status | --quit]"); exit(2)
             }
             DistributedNotificationCenter.default().postNotificationName(.init("com.local.LiveWallpaper.control"), object: nil, userInfo: info, deliverImmediately: true)
             return
@@ -392,3 +476,4 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         app.run()
     }
 }
+#endif

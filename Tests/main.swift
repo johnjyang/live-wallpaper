@@ -57,6 +57,56 @@ try! Data().write(to:fixture.appendingPathComponent("Ambiguous.mov"))
 check(BundledDefault.video(in:fixture) == nil, "ambiguous default movies fall back safely")
 try! FileManager.default.removeItem(at:fixture)
 
+let underwater = "8BE8B524-6EAE-43F5-A3E8-01DCFA1BCD4B"
+let land = "A33A55D9-EDEA-4596-A850-6C10B54FBBB5"
+func shuffleSection(_ collection: String, _ cadence: String) -> [String:Any] {
+    var value = section(collection)
+    var slot = value["Linked"] as! [String:Any]
+    var content = slot["Content"] as! [String:Any]
+    content["EncodedOptionValues"] = try! PropertyListSerialization.data(fromPropertyList:["values":["aerialShuffleFrequency":["picker":["_0":["id":cadence]]]]],format:.binary,options:0)
+    slot["Content"] = content; value["Linked"] = slot
+    return value
+}
+let all = ShuffleChoice(collectionID:"shuffle-all-aerials",cadence:.continuously)
+let water = ShuffleChoice(collectionID:underwater,cadence:.continuously)
+check(WallpaperStore.selection(in:["AllSpacesAndDisplays":shuffleSection(underwater,"shuffle_continuously")],display:"D",space:nil,categoryIDs:[underwater]) == .shuffle(water), "category UUID denotes shuffle rather than a missing movie")
+check(WallpaperStore.selection(in:["AllSpacesAndDisplays":shuffleSection("shuffle-all-aerials","shuffle_continuously")],display:"D",space:nil) == .shuffle(all), "Shuffle All has a non-UUID selection ID")
+check(WallpaperStore.selection(in:["AllSpacesAndDisplays":shuffleSection(underwater,"future-unknown-cadence")],display:"D",space:nil,categoryIDs:[underwater]) == .unavailable, "unknown cadence never silently becomes continuous")
+let now = Date()
+for cadence in [ShuffleCadence.twelveHours,.day,.twoDays,.week,.month] {
+    let choice = ShuffleChoice(collectionID:underwater,cadence:cadence)
+    check(WallpaperStore.selection(in:["AllSpacesAndDisplays":shuffleSection(underwater,cadence.rawValue)],display:"D",space:nil,categoryIDs:[underwater]) == .shuffle(choice), "decode \(cadence.rawValue) from Settings")
+    check(cadence.deadline(after:now)! > now, "scheduled deadline advances into future")
+}
+check(ShuffleCadence.continuously.deadline(after:now) == nil, "continuous shuffle needs no wall-clock timer")
+check(near(ShuffleCadence.twelveHours.deadline(after:now)!.timeIntervalSince(now),43200), "12-hour cadence")
+let catalog = AerialCatalog(["categories":[["id":underwater],["id":land]],"assets":[
+    ["id":a,"categories":[underwater],"includeInShuffle":true],
+    ["id":b,"categories":[land],"includeInShuffle":true],
+    ["id":"4DFE24ED-71CC-42D4-9FE8-3B8959B6CC19","categories":[underwater],"includeInShuffle":false],
+    ["id":"../../invalid","categories":[underwater],"includeInShuffle":true]]])
+check(catalog.candidates(for:water,available:{_ in true}) == [a], "shuffle stays in selected category and honors exclusions")
+check(Set(catalog.candidates(for:all,available:{_ in true})) == Set([a,b]), "all collections include eligible videos")
+check(catalog.candidates(for:water,available:{_ in false}).isEmpty, "missing downloads are never picked")
+var bag = ShuffleBag()
+let candidates = [a,b,underwater] // valid IDs suffice for bag tests; no filesystem access.
+var cycle: [String] = []
+for _ in 0..<3 { cycle.append(bag.select(from:candidates,advance:true)!) }
+check(Set(cycle).count == 3, "visit every candidate once before refilling bag")
+var last = bag.current
+for _ in 0..<30 {
+    let next = bag.select(from:candidates,advance:true)
+    check(next != last, "avoid immediate repeats, including bag boundaries")
+    check(bag.select(from:candidates) == next, "file notifications preserve current shuffle video")
+    last = next
+}
+check(bag.select(from:[]) == nil, "empty collection clears previous video")
+check(bag.select(from:[a]) == a && bag.select(from:[a],advance:true) == a, "one available video keeps looping")
+check(bag.select(from:[b]) == b, "removed current video is replaced immediately")
+var downloadBag = ShuffleBag()
+_ = downloadBag.select(from:[a])
+check(downloadBag.select(from:[a,b],advance:true) == b, "newly downloaded candidate enters rotation")
+
 // Compare the exact sweep against a brute-force oracle over integer cells.
 var seed: UInt64 = 17
 func rand(_ n: Int) -> Int { seed = seed &* 6364136223846793005 &+ 1; return Int((seed >> 32) % UInt64(n)) }
