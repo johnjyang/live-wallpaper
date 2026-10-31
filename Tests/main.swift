@@ -43,6 +43,19 @@ store["Displays"] = ["D":section(b,idleOnly:true)]
 check(WallpaperStore.selection(in:store,display:"D",space:nil) == .aerial(a), "screen saver-only slot never becomes desktop")
 check(WallpaperStore.selection(in:["AllSpacesAndDisplays":section("../../bad")],display:"D",space:nil) == .unavailable, "reject unsafe or unsupported asset IDs")
 check(WallpaperStore.selection(in:[:],display:"D",space:nil) == .unavailable, "malformed store")
+let defaultSection: [String: Any] = ["Type":"linked", "Linked":["Content":["Choices":[["Provider":"default", "Files":[], "Configuration":Data()]]]]]
+check(WallpaperStore.selection(in:["AllSpacesAndDisplays":defaultSection],display:"D",space:nil) == .systemDefault, "Golden Gate Sunset empty default-provider configuration")
+check(WallpaperStore.selection(in:["Displays":["D":defaultSection],"AllSpacesAndDisplays":section(a)],display:"D",space:nil) == .systemDefault, "per-display system default supersedes global aerial")
+check(WallpaperStore.selection(in:["Displays":["D":section(nil)],"AllSpacesAndDisplays":defaultSection],display:"D",space:nil) == .other, "still-image override supersedes system default")
+let fixture = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString,isDirectory:true)
+try! FileManager.default.createDirectory(at:fixture,withIntermediateDirectories:true)
+check(BundledDefault.video(in:fixture) == nil, "image-only default has no movie")
+try! Data().write(to:fixture.appendingPathComponent("DefaultAerial.heic"))
+try! Data().write(to:fixture.appendingPathComponent("Future Default.mov"))
+check(BundledDefault.video(in:fixture)?.lastPathComponent == "Future Default.mov", "resolve bundled movie without hardcoded OS name or asset ID")
+try! Data().write(to:fixture.appendingPathComponent("Ambiguous.mov"))
+check(BundledDefault.video(in:fixture) == nil, "ambiguous default movies fall back safely")
+try! FileManager.default.removeItem(at:fixture)
 
 // Compare the exact sweep against a brute-force oracle over integer cells.
 var seed: UInt64 = 17

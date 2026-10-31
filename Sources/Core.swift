@@ -23,6 +23,7 @@ enum StatusJSON {
 
 enum WallpaperSelection: Equatable {
     case aerial(String)
+    case systemDefault
     case other
     case unavailable
 }
@@ -44,13 +45,32 @@ enum WallpaperStore {
             guard let slot = section[type == "linked" ? "Linked" : "Desktop"] as? [String: Any],
                   let content = slot["Content"] as? [String: Any],
                   let choices = content["Choices"] as? [[String: Any]], let choice = choices.first else { continue }
-            guard choice["Provider"] as? String == "com.apple.wallpaper.choice.aerials" else { return .other }
+            let provider = choice["Provider"] as? String
+            // macOS represents its default aerial (Golden Gate Sunset on
+            // macOS 27) with an empty configuration rather than an asset ID.
+            if provider == "default" {
+                guard (choice["Configuration"] as? Data)?.isEmpty != false else { return .unavailable }
+                return .systemDefault
+            }
+            guard provider == "com.apple.wallpaper.choice.aerials" else { return .other }
             guard let data = choice["Configuration"] as? Data,
                   let config = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
                   let id = config["assetID"] as? String, UUID(uuidString: id) != nil else { return .unavailable }
             return .aerial(id)
         }
         return .unavailable
+    }
+}
+
+enum BundledDefault {
+    static func video(in directory: URL = URL(fileURLWithPath: "/System/Library/Wallpapers/.default", isDirectory: true)) -> URL? {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isRegularFileKey]) else { return nil }
+        let videos = files.filter {
+            ["mov", "mp4"].contains($0.pathExtension.lowercased()) &&
+                (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+        }
+        // Don't guess between unrelated movies if Apple changes this layout.
+        return videos.count == 1 ? videos[0] : nil
     }
 }
 

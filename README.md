@@ -38,6 +38,8 @@ Two Swift source files, using AppKit and AVFoundation:
 3. Present it in a mouse-transparent window above the system wallpaper and below desktop icons.
 4. Follow selection and download changes through filesystem notifications.
 
+The OS-default aerial is a special case: macOS stores it as `Provider: default` with an empty configuration, so there is no asset ID. The helper resolves the single bundled movie in `/System/Library/Wallpapers/.default/` instead. This supports Golden Gate Sunset on macOS 27 without hardcoding its catalog UUID or filename. If the default has no movie or several ambiguous movies, normal macOS behavior is preserved.
+
 Matching displays share an `AVQueuePlayer` and `AVPlayerLooper`. Different scenes use separate players. `AVPlayerLayer` presents the video; the app does not copy or process individual frames. Playback uses `AVPlayer.rate = 1`.
 
 Visibility mode queries window geometry about once per second and calculates the union of covered rectangles. Always and Pause modes disable that timer. There are no screenshots, pixel analysis, eye tracking, or screen-recording permission requests.
@@ -61,7 +63,7 @@ The test suite covers:
 - Wallpaper selection precedence and non-aerial fallbacks.
 - Invalid asset IDs and undefined playback timestamps.
 
-The suite currently passes **226 checks**. Selection changes, original-speed playback, shared playback across two displays, and manual pause/resume were also checked on a running macOS 27 system.
+The suite currently passes **232 checks**. Selection changes, original-speed playback, shared playback across two displays, and manual pause/resume were also checked on a running macOS 27 system.
 
 CI builds and runs the noninteractive tests. It does not validate desktop rendering, permissions, or sleep/wake behavior.
 

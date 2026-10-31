@@ -209,12 +209,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for surface in surfaces {
             let space = spaces[surface.displayUUID] ?? spaces["Main"]
             let selection = WallpaperStore.selection(in: store, display: surface.displayUUID, space: space)
-            guard case .aerial(let id) = selection else {
+            let id: String
+            let url: URL
+            switch selection {
+            case .aerial(let assetID):
+                id = assetID
+                url = wallpaper.appendingPathComponent("aerials/videos/\(id).mov")
+            case .systemDefault:
+                guard let bundled = BundledDefault.video() else {
+                    surface.attach(nil)
+                    surface.reason = "System default has no unambiguous bundled video"
+                    continue
+                }
+                id = "system-default"
+                url = bundled
+                names[id] = "\(url.deletingPathExtension().lastPathComponent) (system default)"
+            case .other, .unavailable:
                 surface.attach(nil)
                 surface.reason = selection == .other ? "Apple still/dynamic wallpaper — normal macOS behavior" : "No direct aerial selection (shuffle is not supported)"
                 continue
             }
-            let url = wallpaper.appendingPathComponent("aerials/videos/\(id).mov")
             guard FileManager.default.fileExists(atPath: url.path) else {
                 surface.attach(nil); surface.reason = "Waiting for \(names[id] ?? id) to finish downloading"; continue
             }
